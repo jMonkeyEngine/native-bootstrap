@@ -45,6 +45,8 @@ Can be used to override the default behavior
 | `natives.cacheDir` | Cache directory for native extraction  |
 | `natives.namespace` | Namespace for native extraction within the home directory |
 | `natives.noAdditionalChecks` | Disables external permission helpers |
+| `natives.preferOsLibraries` | Tries `System.loadLibrary` before classpath extraction (default `false`) |
+| `natives.withOsLibraries` | Enables OS library fallback for missing resources, extraction failures and load failures (default `true`); `false` also disables `preferOsLibraries` |
 
 
 

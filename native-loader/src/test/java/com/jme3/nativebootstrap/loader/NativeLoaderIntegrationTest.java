@@ -21,6 +21,47 @@ class NativeLoaderIntegrationTest {
     private static native int loadCount();
 
     @Test
+    void loadsRealJniFromOsWhenTheClasspathResourceIsMissing() throws Exception {
+        Path base = Files.createDirectory(root.resolve("missing-resource"));
+        Path libraries = installOsProbe(base);
+        runProbe(base, "os-missing", new String[] { "-Djava.library.path=" + libraries });
+    }
+
+    @Test
+    void prefersRealOsJniWithoutExtractingTheClasspathResource() throws Exception {
+        Path base = Files.createDirectory(root.resolve("os-preferred"));
+        Path libraries = installOsProbe(base);
+        runProbe(base, "os-preferred",
+                new String[] { "-Djava.library.path=" + libraries, "-Dnatives.preferOsLibraries=true" });
+    }
+
+    @Test
+    void extractsRealJniWhenThePreferredOsLibraryIsUnavailable() throws Exception {
+        Path base = Files.createDirectory(root.resolve("os-unavailable"));
+        runProbe(base, "os-unavailable",
+                new String[] { "-Djava.library.path=" + base, "-Dnatives.preferOsLibraries=true" });
+    }
+
+    @Test
+    void loadsRealOsJniWhenTheExtractedBinaryCannotLoad() throws Exception {
+        Path base = Files.createDirectory(root.resolve("invalid-classpath-binary"));
+        Path libraries = installOsProbe(base);
+        Files.move(libraries.resolve(System.mapLibraryName("nativebootstrap_probe")),
+                libraries.resolve(System.mapLibraryName("second.bin")));
+        runProbe(base, "os-load-fallback", new String[] { "-Djava.library.path=" + libraries });
+    }
+
+    private Path installOsProbe(Path base) throws Exception {
+        Path libraries = Files.createDirectory(base.resolve("os-libraries"));
+        NativeResource resource = NativeResource.fromClasspath(getClass(),
+                "/native/" + System.mapLibraryName("nativebootstrap_probe"));
+        try (java.io.InputStream input = resource.open()) {
+            Files.copy(input, libraries.resolve(resource.fileName()));
+        }
+        return libraries;
+    }
+
+    @Test
     void preservesRealJniAfterPartialLoadWithoutRetrying() throws Exception {
         runProbe(Files.createDirectory(root.resolve("partial-load")), "partial-load", null);
     }
@@ -117,6 +158,24 @@ class NativeLoaderIntegrationTest {
             }
             NativeResource resource = NativeResource.fromClasspath(Probe.class,
                     "/native/" + System.mapLibraryName("nativebootstrap_probe"));
+            if (args.length > 1 && args[1].startsWith("os-")) {
+                boolean extracts = args[1].equals("os-unavailable") || args[1].equals("os-load-fallback");
+                if (args[1].equals("os-missing")) resource = NativeResource.fromClasspath(Probe.class,
+                        "/not-in-jar/" + System.mapLibraryName("nativebootstrap_probe"));
+                if (args[1].equals("os-load-fallback"))
+                    resource = NativeResource.fromClasspath(Probe.class, "/native/second.bin");
+                Path loaded = new NativeLoader(p -> System.load(p.toString()),
+                        name -> System.loadLibrary(name)).load(Arrays.asList(() -> {
+                            if (!extracts) throw new AssertionError("OS loading should not extract files");
+                            return NativeDirectories.fromRoots("jni-test", Arrays.asList(Paths.get(args[0])),
+                                    OperatingSystems::detect).get(0).get();
+                        }), Arrays.asList(resource));
+                if (extracts ? loaded == null : loaded != null)
+                    throw new AssertionError("Unexpected extraction directory: " + loaded);
+                if (loadCount() != 1) throw new AssertionError("JNI initialized more than once");
+                System.out.println("NATIVE_OK " + answer());
+                return;
+            }
             if (args.length > 1 && args[1].equals("partial-load")) {
                 Path[] directory = new Path[1];
                 java.util.List<String> linked = new java.util.ArrayList<>();
