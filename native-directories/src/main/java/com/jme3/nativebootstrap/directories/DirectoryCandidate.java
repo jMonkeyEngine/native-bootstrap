@@ -33,12 +33,15 @@ public final class DirectoryCandidate implements Supplier<Path> {
     /**
      * Creates missing parents and a fresh extraction directory, or throws UncheckedIOException. The
      * natives.noAdditionalChecks system property disables external permission helpers when true; Java
-     * permission checks and directory creation remain active.
+     * permission checks and directory creation remain active. The returned directory is scheduled for
+     * best-effort deletion at JVM exit; callers must arrange cleanup for any files they add.
      */
     @Override
     public Path get() {
         try {
-            return PrivateDirectory.create(root, prefix, operatingSystem);
+            Path directory = PrivateDirectory.create(root, prefix, operatingSystem);
+            directory.toFile().deleteOnExit();
+            return directory;
         } catch (IOException e) {
             throw new UncheckedIOException("Cannot prepare native directory under " + root, e);
         }
