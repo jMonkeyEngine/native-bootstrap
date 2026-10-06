@@ -18,6 +18,13 @@ class NativeLoaderIntegrationTest {
 
     private static native int answer();
 
+    private static native int loadCount();
+
+    @Test
+    void preservesRealJniAfterPartialLoadWithoutRetrying() throws Exception {
+        runProbe(Files.createDirectory(root.resolve("partial-load")), "partial-load", null);
+    }
+
     @Test
     void loadsRealJniOnTheCurrentPlatform() throws Exception {
         runProbe(Files.createDirectory(root.resolve("extraction")), null, null);
@@ -110,6 +117,34 @@ class NativeLoaderIntegrationTest {
             }
             NativeResource resource = NativeResource.fromClasspath(Probe.class,
                     "/native/" + System.mapLibraryName("nativebootstrap_probe"));
+            if (args.length > 1 && args[1].equals("partial-load")) {
+                Path[] directory = new Path[1];
+                java.util.List<String> linked = new java.util.ArrayList<>();
+                try {
+                    new NativeLoader(p -> {
+                        linked.add(p.getFileName().toString());
+                        System.load(p.toString());
+                    }).load(Arrays.asList(() -> {
+                        directory[0] = NativeDirectories.fromRoots("jni-test",
+                                Arrays.asList(Paths.get(args[0])), OperatingSystems::detect).get(0).get();
+                        return directory[0];
+                    }, () -> {
+                        throw new AssertionError("Must not retry a partial native load");
+                    }), Arrays.asList(resource,
+                            NativeResource.fromClasspath(Probe.class, "/native/second.bin")));
+                    throw new AssertionError("Invalid second binary should fail to load");
+                } catch (UnsatisfiedLinkError error) {
+                    if (!error.getMessage().contains("fallback stopped") || error.getSuppressed().length != 1)
+                        throw new AssertionError("Missing partial-load diagnostics", error);
+                }
+                if (!linked.equals(Arrays.asList(resource.fileName(), "second.bin")) || loadCount() != 1)
+                    throw new AssertionError("Unexpected native load count: " + linked);
+                if (!Files.isRegularFile(directory[0].resolve(resource.fileName()))
+                        || !Files.isRegularFile(directory[0].resolve("second.bin")))
+                    throw new AssertionError("Partial extraction was removed");
+                System.out.println("NATIVE_OK " + answer());
+                return;
+            }
             boolean useDefaultCandidates = args.length > 1 && !args[1].equals("without-helpers")
                     && !args[1].equals("disabled-helpers");
             Path loaded = new NativeLoader(p -> System.load(p.toString())).load(

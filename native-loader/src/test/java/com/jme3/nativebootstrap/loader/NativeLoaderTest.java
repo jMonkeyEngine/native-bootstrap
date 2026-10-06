@@ -69,6 +69,38 @@ class NativeLoaderTest {
     }
 
     @Test
+    void stopsAfterPartialLoadAndPreservesTheEntireExtraction() throws IOException {
+        List<Path> linked = new ArrayList<>();
+        Supplier<Path> failed = () -> {
+            throw new UncheckedIOException(new IOException("unusable root"));
+        };
+        DirectoryCandidate candidate = NativeDirectories
+                .fromRoots("test", Arrays.asList(root), OperatingSystems::detect).get(0);
+        Supplier<Path> unused = () -> {
+            throw new AssertionError("Must not retry after a successful native load");
+        };
+        UnsatisfiedLinkError cause = new UnsatisfiedLinkError("missing transitive dependency");
+        UnsatisfiedLinkError error = assertThrows(UnsatisfiedLinkError.class, () -> new NativeLoader(p -> {
+            linked.add(p);
+            if (p.getFileName().toString().equals("second.bin")) throw cause;
+        }).load(Arrays.asList(failed, candidate, unused),
+                Arrays.asList(resource("first"), resource("second"))));
+        assertEquals(2, linked.size());
+        Path directory = linked.get(0).getParent();
+        assertEquals(directory.resolve("first.bin"), linked.get(0));
+        assertEquals(directory.resolve("second.bin"), linked.get(1));
+        assertTrue(Files.isDirectory(directory));
+        for (Path file : linked) {
+            assertTrue(Files.size(file) > 0);
+        }
+        assertTrue(error.getMessage().contains("successfully loading [" + linked.get(0) + "]"));
+        assertTrue(error.getMessage().contains("extraction preserved at " + directory));
+        assertEquals(2, error.getSuppressed().length);
+        assertEquals("unusable root", error.getSuppressed()[0].getCause().getCause().getMessage());
+        assertSame(cause, error.getSuppressed()[1].getCause());
+    }
+
+    @Test
     void retainsEveryFailureAndCleansUp() throws IOException {
         DirectoryCandidate candidate = NativeDirectories
                 .fromRoots("test", Arrays.asList(root), OperatingSystems::detect).get(0);

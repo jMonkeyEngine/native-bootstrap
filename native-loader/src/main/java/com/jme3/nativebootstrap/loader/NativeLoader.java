@@ -39,7 +39,9 @@ public final class NativeLoader {
      * extraction directory. Suppliers must create fresh, empty directories suitable for native loading. Every
      * invocation is a new extraction; applications should invoke this once during initialization. Files are
      * scheduled for best-effort deletion at JVM exit; native libraries cannot be explicitly unloaded. All
-     * destination failures are retained as suppressed exceptions on the final UnsatisfiedLinkError.
+     * destination failures are retained as suppressed exceptions on the final UnsatisfiedLinkError. Fallback
+     * stops once any binary has loaded successfully: a later failure reports the loaded binaries and
+     * preserves the entire extraction until JVM exit.
      *
      * @param candidates
      *            ordered lazy directory suppliers
@@ -65,6 +67,7 @@ public final class NativeLoader {
         for (Supplier<Path> candidate : destinations) {
             Path directory = null;
             List<Path> files = new ArrayList<>();
+            List<Path> loaded = new ArrayList<>();
             boolean owned = false;
             try {
                 directory = Objects.requireNonNull(candidate.get(), "Candidate returned null")
@@ -83,12 +86,22 @@ public final class NativeLoader {
                         Files.copy(input, file);
                     }
                 }
-                for (Path file : files) linker.accept(file);
+                for (Path file : files) {
+                    linker.accept(file);
+                    loaded.add(file);
+                }
                 return directory;
             } catch (IOException | UncheckedIOException | SecurityException | UnsupportedOperationException
                     | UnsatisfiedLinkError e) {
                 IOException attempt = new IOException("Native load attempt failed for " + candidate, e);
                 failure.addSuppressed(attempt);
+                if (!loaded.isEmpty()) {
+                    UnsatisfiedLinkError partial = new UnsatisfiedLinkError(
+                            "Native loading failed after successfully loading " + loaded
+                                    + "; fallback stopped and extraction preserved at " + directory);
+                    for (Throwable prior : failure.getSuppressed()) partial.addSuppressed(prior);
+                    throw partial;
+                }
                 for (int i = files.size() - 1; i >= 0; i--) {
                     try {
                         Files.deleteIfExists(files.get(i));
