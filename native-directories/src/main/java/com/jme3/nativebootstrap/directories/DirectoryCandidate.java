@@ -15,7 +15,7 @@ public final class DirectoryCandidate implements Supplier<Path> {
     private final String prefix;
     private final OperatingSystem operatingSystem;
 
-    DirectoryCandidate(Path root, String namespace, OperatingSystem operatingSystem) {
+    public DirectoryCandidate(Path root, String namespace, OperatingSystem operatingSystem) {
         this.root = root.toAbsolutePath().normalize();
         this.prefix = namespace + "-";
         this.operatingSystem = operatingSystem;
