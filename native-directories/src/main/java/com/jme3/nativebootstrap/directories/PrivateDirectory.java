@@ -64,8 +64,15 @@ final class PrivateDirectory {
         }
         Path existing = root;
         while (existing != null && !Files.exists(existing)) existing = existing.getParent();
-        if (existing == null || Files.getFileAttributeView(existing, PosixFileAttributeView.class) == null)
-            throw new IOException("POSIX permissions are unavailable for " + root);
+        if (existing == null) throw new IOException("POSIX permissions are unavailable for " + root);
+        existing = existing.toRealPath();
+        PosixFileAttributeView permissions = Files.getFileAttributeView(existing,
+                PosixFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
+        if (permissions == null) throw new IOException("POSIX permissions are unavailable for " + root);
+        // A provider may return a view even when reading it is unsupported or
+        // denied. Verify the actual attributes before creating any directories.
+        if (!permissions.readAttributes().isDirectory())
+            throw new IOException("Extraction ancestor is not a directory: " + existing);
         if (!Files.isDirectory(root))
             Files.createDirectories(root, PosixFilePermissions.asFileAttribute(PRIVATE));
         root = root.toRealPath();
