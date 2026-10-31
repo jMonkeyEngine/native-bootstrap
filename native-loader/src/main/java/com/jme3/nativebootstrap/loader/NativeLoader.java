@@ -19,7 +19,6 @@ import java.util.stream.Stream;
 /** Extracts dependencies and the main library together, trying destinations in order. */
 public final class NativeLoader {
     private final Consumer<Path> linker;
-    private final Consumer<String> osLinker;
 
     /** Uses System.load and System.loadLibrary from this module's classloader. */
     public NativeLoader() {
@@ -27,28 +26,14 @@ public final class NativeLoader {
     }
 
     /**
-     * Uses a caller-provided file linker and System.loadLibrary from this module's classloader. Applications
-     * with isolated classloaders should provide both linkers from the class that owns their JNI bindings.
+     * Uses a caller-provided file linker. Android and desktop OS-library fallback use System.loadLibrary from
+     * this module's classloader.
      *
      * @param linker
      *            native loading operation
      */
     public NativeLoader(Consumer<Path> linker) {
-        this(linker, name -> System.loadLibrary(name));
-    }
-
-    /**
-     * Uses caller-provided file and OS linkers, for example {@code path -> System.load(path.toString())} and
-     * {@code name -> System.loadLibrary(name)} from the class that owns the JNI bindings.
-     *
-     * @param linker
-     *            native loading operation for extracted files
-     * @param osLinker
-     *            native loading operation for logical OS library names
-     */
-    public NativeLoader(Consumer<Path> linker, Consumer<String> osLinker) {
         this.linker = Objects.requireNonNull(linker, "linker");
-        this.osLinker = Objects.requireNonNull(osLinker, "osLinker");
     }
 
     /**
@@ -115,7 +100,7 @@ public final class NativeLoader {
             List<String> loaded = new ArrayList<>();
             for (NativeResource resource : resources) {
                 try {
-                    osLinker.accept(resource.libraryName());
+                    System.loadLibrary(resource.libraryName());
                     loaded.add("OS library " + resource.libraryName());
                 } catch (UnsatisfiedLinkError | SecurityException e) {
                     failure.addSuppressed(e);
@@ -134,7 +119,7 @@ public final class NativeLoader {
                 && (preferOsLibraries || !resources.get(first).available())) {
             NativeResource resource = resources.get(first);
             try {
-                osLinker.accept(resource.libraryName());
+                System.loadLibrary(resource.libraryName());
                 loaded.add("OS library " + resource.libraryName());
                 first++;
             } catch (UnsatisfiedLinkError | SecurityException e) {
@@ -198,7 +183,7 @@ public final class NativeLoader {
         if (withOsLibraries) {
             for (NativeResource resource : resources.subList(first, resources.size())) {
                 try {
-                    osLinker.accept(resource.libraryName());
+                    System.loadLibrary(resource.libraryName());
                     loaded.add("OS library " + resource.libraryName());
                 } catch (UnsatisfiedLinkError | SecurityException e) {
                     failure.addSuppressed(e);
@@ -215,7 +200,7 @@ public final class NativeLoader {
         Throwable osFailure = null;
         if (withOsLibraries && (preferOsLibraries || !resource.available())) {
             try {
-                osLinker.accept(resource.libraryName());
+                System.loadLibrary(resource.libraryName());
                 return "OS library " + resource.libraryName();
             } catch (UnsatisfiedLinkError | SecurityException e) {
                 if (!resource.available()) throw e;
@@ -231,7 +216,7 @@ public final class NativeLoader {
             if (osFailure != null) e.addSuppressed(osFailure);
             if (withOsLibraries && !preferOsLibraries) {
                 try {
-                    osLinker.accept(resource.libraryName());
+                    System.loadLibrary(resource.libraryName());
                     return "OS library " + resource.libraryName();
                 } catch (UnsatisfiedLinkError | SecurityException os) {
                     e.addSuppressed(os);

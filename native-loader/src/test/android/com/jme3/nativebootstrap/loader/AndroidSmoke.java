@@ -16,7 +16,11 @@ public final class AndroidSmoke {
         if (OperatingSystems.detect() != OperatingSystem.ANDROID)
             throw new AssertionError("Android runtime not detected: " + OperatingSystems.detect());
         Path extraction = Paths.get(args[0]);
-        System.setProperty("natives.tempDir", extraction.toString());
+        System.clearProperty("java.io.tmpdir");
+        System.clearProperty("user.home");
+        System.clearProperty("natives.tempDir");
+        System.clearProperty("natives.userHome");
+        System.clearProperty("natives.cacheDir");
         System.setProperty("natives.withOsLibraries", "false");
         NativeResource resource = NativeResource.fromClasspath(AndroidSmoke.class,
                 "/native/" + System.mapLibraryName("nativebootstrap_probe"));

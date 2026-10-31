@@ -44,6 +44,21 @@ class NativeLoaderIntegrationTest {
     }
 
     @Test
+    void loadsRealOsJniWhenNoExtractionDirectoryWorks() throws Exception {
+        Path base = Files.createDirectory(root.resolve("os-no-directory"));
+        Path libraries = installOsProbe(base);
+        runProbe(base, "os-no-directory", new String[] { "-Djava.library.path=" + libraries });
+    }
+
+    @Test
+    void neverReloadsRealOsJniAfterPartialSuccess() throws Exception {
+        Path base = Files.createDirectory(root.resolve("os-partial"));
+        Path libraries = installOsProbe(base);
+        runProbe(base, "os-partial",
+                new String[] { "-Djava.library.path=" + libraries, "-Dnatives.preferOsLibraries=true" });
+    }
+
+    @Test
     void extractsRealJniWhenThePreferredOsLibraryIsUnavailable() throws Exception {
         Path base = Files.createDirectory(root.resolve("os-unavailable"));
         runProbe(base, "os-unavailable",
@@ -173,6 +188,27 @@ class NativeLoaderIntegrationTest {
             }
             NativeResource resource = NativeResource.fromClasspath(Probe.class,
                     "/native/" + System.mapLibraryName("nativebootstrap_probe"));
+            if (args.length > 1 && args[1].equals("os-partial")) {
+                UnsatisfiedLinkError fileFailure = new UnsatisfiedLinkError("Invalid second binary");
+                try {
+                    new NativeLoader(path -> {
+                        throw fileFailure;
+                    }).load(Arrays.asList(() -> NativeDirectories.fromRoots("jni-test",
+                            Arrays.asList(Paths.get(args[0])), OperatingSystems::detect).get(0).get(), () -> {
+                                throw new AssertionError("Must not retry a partial OS load");
+                            }), Arrays.asList(resource,
+                                    NativeResource.fromClasspath(Probe.class, "/native/second.bin")));
+                    throw new AssertionError("Second binary should fail");
+                } catch (UnsatisfiedLinkError error) {
+                    if (!error.getMessage().contains("OS library nativebootstrap_probe")
+                            || error.getSuppressed().length != 2
+                            || error.getSuppressed()[1].getCause() != fileFailure)
+                        throw new AssertionError("Missing partial OS load diagnostics", error);
+                }
+                if (loadCount() != 1) throw new AssertionError("JNI initialized more than once");
+                System.out.println("NATIVE_OK " + answer());
+                return;
+            }
             if (args.length > 1 && args[1].equals("readme")) {
                 Path loaded = new NativeLoader(path -> System.load(path.toString())).load(
                         NativeDirectories.candidates("jni-test", OperatingSystems::detect),
@@ -193,12 +229,14 @@ class NativeLoaderIntegrationTest {
                     resource = NativeResource.fromClasspath(Probe.class, "/native/second.bin");
                 java.util.List<? extends java.util.function.Supplier<Path>> candidates = args[1]
                         .equals("os-android") ? NativeDirectories.fromRoots("jni-test", Arrays.asList(Paths.get(args[0])), OperatingSystems::detect) : Arrays.asList(() -> {
+                            if (args[1].equals("os-no-directory")) throw new java.io.UncheckedIOException(
+                                    new java.io.IOException("Unwritable root"));
                             if (!extracts) throw new AssertionError("OS loading should not extract files");
                             return NativeDirectories.fromRoots("jni-test", Arrays.asList(Paths.get(args[0])),
                                     OperatingSystems::detect).get(0).get();
                         });
-                Path loaded = new NativeLoader(p -> System.load(p.toString()),
-                        name -> System.loadLibrary(name)).load(candidates, Arrays.asList(resource));
+                Path loaded = new NativeLoader(p -> System.load(p.toString())).load(candidates,
+                        Arrays.asList(resource));
                 if (extracts ? loaded == null : loaded != null)
                     throw new AssertionError("Unexpected extraction directory: " + loaded);
                 if (loadCount() != 1) throw new AssertionError("JNI initialized more than once");

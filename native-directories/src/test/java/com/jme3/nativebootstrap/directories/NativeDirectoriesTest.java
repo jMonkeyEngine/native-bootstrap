@@ -93,6 +93,42 @@ class NativeDirectoriesTest {
     }
 
     @Test
+    void mobileCandidatesReturnOnlyAVirtualCandidateEvenWithExplicitRoots() {
+        System.clearProperty("user.home");
+        System.clearProperty("java.io.tmpdir");
+        for (OperatingSystem os : Arrays.asList(OperatingSystem.ANDROID, OperatingSystem.IOS)) {
+            List<DirectoryCandidate> candidates = NativeDirectories.candidates("test", () -> os);
+            assertEquals(1, candidates.size());
+            DirectoryCandidate virtual = candidates.get(0);
+            assertEquals(os, virtual.operatingSystem());
+            assertThrows(UnsupportedOperationException.class, virtual::root);
+            assertThrows(UncheckedIOException.class, virtual::get);
+            assertTrue(virtual.toString().contains(os.toString()));
+            assertEquals(1,
+                    NativeDirectories.fromRoots("test", java.util.Collections.emptyList(), () -> os).size());
+            List<DirectoryCandidate> withRoot = NativeDirectories.fromRoots("test", Arrays.asList(root),
+                    () -> os);
+            assertEquals(1, withRoot.size());
+            assertThrows(UnsupportedOperationException.class, withRoot.get(0)::root);
+        }
+        assertTrue(NativeDirectories
+                .fromRoots("test", java.util.Collections.emptyList(), () -> OperatingSystem.LINUX).isEmpty());
+    }
+
+    @Test
+    void mobileCandidatesDoNotResolveExtractionPathProperties() {
+        for (String property : Arrays.asList("natives.tempDir", "natives.userHome", "natives.cacheDir"))
+            System.setProperty(property, "relative-path");
+        for (OperatingSystem os : Arrays.asList(OperatingSystem.ANDROID, OperatingSystem.IOS)) {
+            List<DirectoryCandidate> candidates = NativeDirectories.candidates("test", Arrays.asList(root),
+                    () -> os);
+            assertEquals(1, candidates.size());
+            assertEquals(os, candidates.get(0).operatingSystem());
+            assertThrows(UnsupportedOperationException.class, candidates.get(0)::root);
+        }
+    }
+
+    @Test
     void homeOverrideAlsoDrivesTheDefaultMacCache() {
         Path home = root.resolve("override-home");
         System.setProperty("natives.userHome", home.toString());

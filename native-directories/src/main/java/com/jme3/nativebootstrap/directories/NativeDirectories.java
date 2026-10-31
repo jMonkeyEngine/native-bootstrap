@@ -19,7 +19,8 @@ public final class NativeDirectories {
     /**
      * Returns preferred roots, JVM temp, user cache and ~/.jme3/natives/namespace, in that order. Default
      * paths may be overridden with natives.tempDir, natives.userHome and natives.cacheDir. The default .jme3
-     * home prefix may be overridden with natives.namespace.
+     * home prefix may be overridden with natives.namespace. Android and iOS return only a virtual candidate
+     * that carries the platform without referring to a filesystem directory.
      *
      * @param namespace
      *            application or library name
@@ -38,7 +39,8 @@ public final class NativeDirectories {
 
     /**
      * Returns preferred roots, JVM temp, user cache and ~/homePrefix/natives/namespace, in that order. Path
-     * system properties apply; the explicit homePrefix takes precedence over natives.namespace.
+     * system properties apply; the explicit homePrefix takes precedence over natives.namespace. Android and
+     * iOS return only a virtual candidate without a filesystem directory.
      *
      * @param homePrefix
      *            directory name under the user's home, for example ".jme3"
@@ -55,6 +57,8 @@ public final class NativeDirectories {
         validateHomePrefix(homePrefix);
         validateNamespace(namespace);
         OperatingSystem os = resolve(operatingSystem);
+        if (os == OperatingSystem.ANDROID || os == OperatingSystem.IOS)
+            return buildCandidates(namespace, Collections.emptyList(), os);
         Set<Path> roots = new LinkedHashSet<>();
         for (Path root : preferredRoots) roots.add(Objects.requireNonNull(root).toAbsolutePath().normalize());
         Path temp = overridePath("natives.tempDir");
@@ -108,7 +112,8 @@ public final class NativeDirectories {
     }
 
     /**
-     * Uses only these roots, preserving order and removing duplicates. No filesystem access occurs.
+     * Uses only these roots, preserving order and removing duplicates. Android and iOS ignore the roots and
+     * return only a virtual candidate. No filesystem access occurs.
      *
      * @param namespace
      *            application or library name
@@ -126,6 +131,8 @@ public final class NativeDirectories {
 
     private static List<DirectoryCandidate> buildCandidates(String namespace, List<Path> roots,
             OperatingSystem os) {
+        if (os == OperatingSystem.ANDROID || os == OperatingSystem.IOS)
+            return Collections.singletonList(new DirectoryCandidate(os));
         Set<Path> unique = new LinkedHashSet<>();
         for (Path root : roots) unique.add(Objects.requireNonNull(root).toAbsolutePath().normalize());
         List<DirectoryCandidate> result = new ArrayList<>();

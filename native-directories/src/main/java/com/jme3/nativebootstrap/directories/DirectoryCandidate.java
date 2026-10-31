@@ -21,12 +21,21 @@ public final class DirectoryCandidate implements Supplier<Path> {
         this.operatingSystem = operatingSystem;
     }
 
+    DirectoryCandidate(OperatingSystem operatingSystem) {
+        this.root = null;
+        this.prefix = null;
+        this.operatingSystem = operatingSystem;
+    }
+
     /**
      * Returns the destination root without creating or accessing it.
      *
      * @return the configured absolute root
+     * @throws UnsupportedOperationException
+     *             if this is a virtual mobile candidate
      */
     public Path root() {
+        if (root == null) throw new UnsupportedOperationException("No root directory available");
         return root;
     }
 
@@ -48,6 +57,7 @@ public final class DirectoryCandidate implements Supplier<Path> {
     @Override
     public Path get() {
         try {
+            if (root == null) throw new IOException("Mobile candidate has no extraction directory");
             try {
                 root.toFile();
             } catch (UnsupportedOperationException e) {
@@ -63,6 +73,6 @@ public final class DirectoryCandidate implements Supplier<Path> {
 
     @Override
     public String toString() {
-        return root.toString();
+        return root == null ? operatingSystem + " candidate" : root.toString();
     }
 }

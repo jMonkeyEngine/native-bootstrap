@@ -65,3 +65,13 @@ Path loadedFrom = new NativeLoader(path -> System.load(path.toString())).load(
     )
 );
 ```
+
+> [!TIP]
+> On Android and iOS, `NativeDirectories` returns only a virtual candidate; no extraction paths are resolved.
+>
+> - **Android:** the loader skips the provided `Consumer<Path>` and calls `System.loadLibrary` directly with the
+>   logical library name (for example, `/native/libbindings.so` becomes `bindings`). The native libraries must
+>   already be packaged with the app.
+> - **iOS:** the loading consumer is not invoked; the native code must already be linked into the app.
+>
+> Both paths return `null` in `loadedFrom`. On iOS, this does not verify that native symbols are present.

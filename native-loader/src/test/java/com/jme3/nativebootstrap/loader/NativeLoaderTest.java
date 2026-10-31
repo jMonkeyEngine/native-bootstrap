@@ -52,39 +52,18 @@ class NativeLoaderTest {
     }
 
     @Test
-    void androidLoadsInstalledLibrariesInOrderWithoutExtractionEvenWhenOsFallbackIsDisabled() {
-        List<String> loaded = new ArrayList<>();
-        NativeLoader loader = new NativeLoader(path -> fail("Android must not extract"), loaded::add);
-        NativeResource installed = NativeResource.fromClasspath(getClass(),
-                "/native/" + System.mapLibraryName("installed"));
-        assertNull(loader.load(NativeDirectories.fromRoots("test", Arrays.asList(root.resolve("absent")),
-                () -> OperatingSystem.ANDROID), Arrays.asList(resource("first"), installed)));
-        assertFalse(Files.exists(root.resolve("absent")));
-        assertEquals(Arrays.asList("first.bin", "installed"), loaded);
-    }
-
-    @Test
-    void androidFailureStopsLoadingWithoutTryingExtraction() {
-        List<String> loaded = new ArrayList<>();
-        UnsatisfiedLinkError cause = new UnsatisfiedLinkError("missing installed library");
-        NativeLoader loader = new NativeLoader(path -> fail("Android must not extract"), name -> {
-            if (name.equals("second.bin")) throw cause;
-            loaded.add(name);
-        });
+    void androidFailureDoesNotTryExtraction() {
+        NativeLoader loader = new NativeLoader(path -> fail("Android must not extract"));
         UnsatisfiedLinkError error = assertThrows(UnsatisfiedLinkError.class,
                 () -> loader.load(Arrays.asList(() -> {
                     throw new AssertionError("Must not create directories");
-                }), Arrays.asList(resource("first"), resource("second"), resource("third")),
-                        OperatingSystem.ANDROID));
-        assertEquals(Arrays.asList("first.bin"), loaded);
-        assertSame(cause, error.getSuppressed()[0]);
-        assertTrue(error.getMessage().contains("successfully loading"));
+                }), Arrays.asList(resource("missing")), OperatingSystem.ANDROID));
+        assertInstanceOf(UnsatisfiedLinkError.class, error.getSuppressed()[0]);
     }
 
     @Test
     void iosUsesAlreadyLinkedCodeWithoutExtractionOrLoading() {
-        NativeLoader loader = new NativeLoader(path -> fail("iOS must not extract"),
-                name -> fail("iOS must not dynamically load"));
+        NativeLoader loader = new NativeLoader(path -> fail("iOS must not extract"));
         assertNull(loader.load(NativeDirectories.fromRoots("test", Arrays.asList(root.resolve("absent")),
                 () -> OperatingSystem.IOS), Arrays.asList(resource("first"), resource("second"))));
         assertFalse(Files.exists(root.resolve("absent")));
@@ -92,10 +71,20 @@ class NativeLoaderTest {
 
     @Test
     void explicitIosWorksWithoutDirectoryCandidates() {
-        NativeLoader loader = new NativeLoader(path -> fail("iOS must not extract"),
-                name -> fail("iOS must not dynamically load"));
+        NativeLoader loader = new NativeLoader(path -> fail("iOS must not extract"));
         assertNull(
                 loader.load(Collections.emptyList(), Arrays.asList(resource("first")), OperatingSystem.IOS));
+    }
+
+    @Test
+    void virtualMobileCandidatesSelectTheCorrectLoadingPathWithoutDirectories() {
+        NativeLoader loader = new NativeLoader(path -> fail("Mobile must not extract"));
+        assertThrows(UnsatisfiedLinkError.class, () -> loader.load(
+                NativeDirectories.fromRoots("test", Collections.emptyList(), () -> OperatingSystem.ANDROID),
+                Arrays.asList(resource("missing"))));
+        assertNull(loader.load(
+                NativeDirectories.fromRoots("test", Collections.emptyList(), () -> OperatingSystem.IOS),
+                Arrays.asList(resource("missing"))));
     }
 
     @Test
@@ -200,8 +189,7 @@ class NativeLoaderTest {
         NativeResource missing = resource("missing");
         assertFalse(missing.available());
         UnsatisfiedLinkError error = assertThrows(UnsatisfiedLinkError.class,
-                () -> new NativeLoader(p -> fail("Must not load a missing file"),
-                        name -> fail("OS loading is disabled"))
+                () -> new NativeLoader(p -> fail("Must not load a missing file"))
                         .load(Arrays.asList(() -> root), Arrays.asList(missing)));
         assertTrue(error.getSuppressed()[0].getCause().getMessage().contains("missing.bin"));
     }
@@ -233,125 +221,34 @@ class NativeLoaderTest {
     void prefersClasspathByDefault() {
         System.clearProperty("natives.withOsLibraries");
         assertNotNull(new NativeLoader(p -> {
-        }, name -> fail("Classpath should be tried first")).load(Arrays.asList(() -> root),
-                Arrays.asList(resource("first"))));
-    }
-
-    @Test
-    void fallsBackToOsForMissingResourcesByDefaultWithoutCreatingDirectories() {
-        System.clearProperty("natives.withOsLibraries");
-        List<String> loaded = new ArrayList<>();
-        NativeResource missing = NativeResource.fromClasspath(getClass(),
-                "/missing/" + System.mapLibraryName("missing"));
-        assertEquals("missing", missing.libraryName());
-        assertNull(new NativeLoader(p -> fail("Must not load a missing file"), loaded::add)
-                .load(Arrays.asList(() -> {
-                    throw new AssertionError("No extraction needed");
-                }), Arrays.asList(missing)));
-        assertEquals(Arrays.asList("missing"), loaded);
-    }
-
-    @Test
-    void prefersOsLibrariesWithoutExtractingAnything() {
-        System.setProperty("natives.withOsLibraries", "true");
-        System.setProperty("natives.preferOsLibraries", "true");
-        List<String> loaded = new ArrayList<>();
-        assertNull(new NativeLoader(p -> fail("OS libraries should be tried first"), loaded::add)
-                .load(Arrays.asList(() -> {
-                    throw new AssertionError("No extraction needed");
-                }), Arrays.asList(resource("first"), resource("second"))));
-        assertEquals(Arrays.asList("first.bin", "second.bin"), loaded);
+        }).load(Arrays.asList(() -> root), Arrays.asList(resource("first"))));
     }
 
     @Test
     void disabledOsLibrariesOverrideThePreference() {
         System.setProperty("natives.preferOsLibraries", "true");
         assertNotNull(new NativeLoader(p -> {
-        }, name -> fail("OS loading is disabled")).load(Arrays.asList(() -> root),
-                Arrays.asList(resource("first"))));
+        }).load(Arrays.asList(() -> root), Arrays.asList(resource("first"))));
     }
 
     @Test
     void extractsWhenPreferredOsLibraryIsUnavailable() {
         System.setProperty("natives.withOsLibraries", "true");
         System.setProperty("natives.preferOsLibraries", "true");
-        List<String> order = new ArrayList<>();
-        assertNotNull(new NativeLoader(p -> order.add("file"), name -> {
-            order.add("OS");
-            throw new UnsatisfiedLinkError("not installed");
-        }).load(Arrays.asList(() -> root), Arrays.asList(resource("first"))));
-        assertEquals(Arrays.asList("OS", "file"), order);
-    }
-
-    @Test
-    void fallsBackToOsAfterExtractedLibraryFailsToLoad() {
-        System.setProperty("natives.withOsLibraries", "true");
-        List<String> order = new ArrayList<>();
-        Path directory = new NativeLoader(p -> {
-            order.add("file");
-            throw new UnsatisfiedLinkError("bad binary");
-        }, name -> order.add("OS")).load(Arrays.asList(() -> root), Arrays.asList(resource("first")));
-        assertEquals(Arrays.asList("file", "OS"), order);
-        assertEquals(root, directory);
-    }
-
-    @Test
-    void fallsBackToOsWhenNoExtractionDirectoryWorks() {
-        System.setProperty("natives.withOsLibraries", "true");
-        List<String> order = new ArrayList<>();
-        assertNull(new NativeLoader(p -> fail("Cannot extract"), name -> order.add("OS"))
-                .load(Arrays.asList(() -> {
-                    order.add("directory");
-                    throw new UncheckedIOException(new IOException("unwritable root"));
-                }), Arrays.asList(resource("first"))));
-        assertEquals(Arrays.asList("directory", "OS"), order);
-    }
-
-    @Test
-    void mixesExtractedAndMissingOsLibrariesInDependencyOrder() {
-        System.setProperty("natives.withOsLibraries", "true");
-        List<String> order = new ArrayList<>();
-        assertNotNull(
-                new NativeLoader(p -> order.add("file " + p.getFileName()), name -> order.add("OS " + name))
-                        .load(Arrays.asList(() -> root),
-                                Arrays.asList(resource("first"), resource("missing"), resource("second"))));
-        assertEquals(Arrays.asList("file first.bin", "OS missing.bin", "file second.bin"), order);
-    }
-
-    @Test
-    void neverReloadsOsLibrariesAfterPartialSuccess() {
-        System.setProperty("natives.withOsLibraries", "true");
-        System.setProperty("natives.preferOsLibraries", "true");
-        List<String> loaded = new ArrayList<>();
-        UnsatisfiedLinkError osFailure = new UnsatisfiedLinkError("OS second library failed");
-        UnsatisfiedLinkError fileFailure = new UnsatisfiedLinkError("file second library failed");
-        UnsatisfiedLinkError error = assertThrows(UnsatisfiedLinkError.class, () -> new NativeLoader(p -> {
-            throw fileFailure;
-        }, name -> {
-            loaded.add(name);
-            if (name.equals("second.bin")) throw osFailure;
-        }).load(Arrays.asList(() -> root, () -> {
-            throw new AssertionError("Must not retry a partial load");
-        }), Arrays.asList(resource("first"), resource("second"))));
-        assertEquals(Arrays.asList("first.bin", "second.bin"), loaded);
-        assertTrue(error.getMessage().contains("OS library first.bin"));
-        assertEquals(2, error.getSuppressed().length);
-        assertSame(osFailure, error.getSuppressed()[0]);
-        assertSame(fileFailure, error.getSuppressed()[1].getCause());
-        assertTrue(Files.exists(root.resolve("second.bin")));
+        List<Path> linked = new ArrayList<>();
+        assertNotNull(new NativeLoader(linked::add).load(Arrays.asList(() -> root),
+                Arrays.asList(resource("first"))));
+        assertEquals(Arrays.asList(root.resolve("first.bin")), linked);
     }
 
     @Test
     void retainsBothFileAndOsFailures() {
         System.setProperty("natives.withOsLibraries", "true");
-        UnsatisfiedLinkError osFailure = new UnsatisfiedLinkError("not installed");
         UnsatisfiedLinkError fileFailure = new UnsatisfiedLinkError("invalid binary");
         UnsatisfiedLinkError error = assertThrows(UnsatisfiedLinkError.class, () -> new NativeLoader(p -> {
             throw fileFailure;
-        }, name -> {
-            throw osFailure;
         }).load(Arrays.asList(() -> root), Arrays.asList(resource("first"))));
         assertSame(fileFailure, error.getSuppressed()[0].getCause());
-        assertSame(osFailure, fileFailure.getSuppressed()[0]);
+        assertInstanceOf(UnsatisfiedLinkError.class, fileFailure.getSuppressed()[0]);
     }
 }
