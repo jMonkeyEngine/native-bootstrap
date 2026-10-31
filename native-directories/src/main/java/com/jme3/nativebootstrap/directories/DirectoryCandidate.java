@@ -31,6 +31,15 @@ public final class DirectoryCandidate implements Supplier<Path> {
     }
 
     /**
+     * Returns the operating system selected when this candidate was created.
+     *
+     * @return the selected operating system
+     */
+    public OperatingSystem operatingSystem() {
+        return operatingSystem;
+    }
+
+    /**
      * Creates missing parents and a fresh extraction directory, or throws UncheckedIOException. The
      * natives.noAdditionalChecks system property disables external permission helpers when true; Java
      * permission checks and directory creation remain active. The returned directory is scheduled for

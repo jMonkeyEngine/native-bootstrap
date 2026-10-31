@@ -1,5 +1,7 @@
 package com.jme3.nativebootstrap.loader;
 
+import com.jme3.nativebootstrap.common.OperatingSystem;
+import com.jme3.nativebootstrap.directories.DirectoryCandidate;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -59,7 +61,11 @@ public final class NativeLoader {
      * successfully: a later failure reports the loaded binaries and preserves the entire extraction until JVM
      * exit. The natives.withOsLibraries property enables OS fallback (default true);
      * natives.preferOsLibraries tries OS libraries first (default false). Disabling withOsLibraries disables
-     * both OS modes.
+     * both OS modes on desktop. On Android, libraries are loaded by OS name without extraction regardless of
+     * these properties. On iOS, no loading is performed: binaries must already be linked into the app. The
+     * platform is taken from the first DirectoryCandidate, if present; otherwise the desktop behavior is
+     * used. Use the overload with an explicit operating system for custom suppliers or an empty candidate
+     * list.
      *
      * @param candidates
      *            ordered lazy directory suppliers
@@ -68,6 +74,29 @@ public final class NativeLoader {
      * @return the extraction directory, or null if no extraction was needed
      */
     public Path load(List<? extends Supplier<Path>> candidates, List<NativeResource> binaries) {
+        OperatingSystem os = null;
+        for (Supplier<Path> candidate : candidates) {
+            if (candidate instanceof DirectoryCandidate) {
+                os = ((DirectoryCandidate) candidate).operatingSystem();
+                break;
+            }
+        }
+        return load(candidates, binaries, os);
+    }
+
+    /**
+     * Loads with an explicit operating system, including when using custom or no directory suppliers.
+     *
+     * @param candidates
+     *            ordered lazy directory suppliers
+     * @param binaries
+     *            dependencies followed by the main library
+     * @param operatingSystem
+     *            operating system to use, or null for desktop behavior
+     * @return the extraction directory, or null if no extraction was needed
+     */
+    public Path load(List<? extends Supplier<Path>> candidates, List<NativeResource> binaries,
+            OperatingSystem operatingSystem) {
         List<NativeResource> resources = new ArrayList<>(binaries);
         List<? extends Supplier<Path>> destinations = new ArrayList<>(candidates);
         for (NativeResource resource : resources) Objects.requireNonNull(resource, "resource");
@@ -79,6 +108,21 @@ public final class NativeLoader {
             // Reject case-only aliases as well, for case-insensitive extraction filesystems.
             if (!names.add(resource.fileName().toLowerCase(java.util.Locale.ROOT)))
                 throw new IllegalArgumentException("Duplicate native filename: " + resource.fileName());
+        }
+        if (operatingSystem == OperatingSystem.IOS) return null;
+        if (operatingSystem == OperatingSystem.ANDROID) {
+            UnsatisfiedLinkError failure = new UnsatisfiedLinkError("Native loading failed");
+            List<String> loaded = new ArrayList<>();
+            for (NativeResource resource : resources) {
+                try {
+                    osLinker.accept(resource.libraryName());
+                    loaded.add("OS library " + resource.libraryName());
+                } catch (UnsatisfiedLinkError | SecurityException e) {
+                    failure.addSuppressed(e);
+                    throw loadingFailure(failure, loaded, null);
+                }
+            }
+            return null;
         }
         boolean withOsLibraries = Boolean.parseBoolean(System.getProperty("natives.withOsLibraries", "true"));
         boolean preferOsLibraries = withOsLibraries && Boolean.getBoolean("natives.preferOsLibraries");
