@@ -16,3 +16,8 @@ JNIEXPORT jint JNICALL Java_com_jme3_nativebootstrap_loader_NativeLoaderIntegrat
     (void)env; (void)cls;
     return 42;
 }
+
+JNIEXPORT jint JNICALL Java_com_jme3_nativebootstrap_loader_AndroidSmoke_answer(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    return 42;
+}

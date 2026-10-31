@@ -36,6 +36,14 @@ class NativeLoaderIntegrationTest {
     }
 
     @Test
+    void androidBranchLoadsRealOsJniWithoutExtracting() throws Exception {
+        Path base = Files.createDirectory(root.resolve("android-os"));
+        Path libraries = installOsProbe(base);
+        runProbe(base, "os-android",
+                new String[] { "-Djava.library.path=" + libraries, "-Dnatives.withOsLibraries=false" });
+    }
+
+    @Test
     void extractsRealJniWhenThePreferredOsLibraryIsUnavailable() throws Exception {
         Path base = Files.createDirectory(root.resolve("os-unavailable"));
         runProbe(base, "os-unavailable",
@@ -69,6 +77,13 @@ class NativeLoaderIntegrationTest {
     @Test
     void loadsRealJniOnTheCurrentPlatform() throws Exception {
         runProbe(Files.createDirectory(root.resolve("extraction")), null, null);
+    }
+
+    @Test
+    void readmeExampleExtractsAndLoadsRealJni() throws Exception {
+        Path base = Files.createDirectory(root.resolve("readme"));
+        runProbe(base, "readme", new String[] { "-Dnatives.tempDir=" + base.resolve("natives"),
+                "-Dnatives.withOsLibraries=false" });
     }
 
     @Test
@@ -158,18 +173,32 @@ class NativeLoaderIntegrationTest {
             }
             NativeResource resource = NativeResource.fromClasspath(Probe.class,
                     "/native/" + System.mapLibraryName("nativebootstrap_probe"));
+            if (args.length > 1 && args[1].equals("readme")) {
+                Path loaded = new NativeLoader(path -> System.load(path.toString())).load(
+                        NativeDirectories.candidates("jni-test", OperatingSystems::detect),
+                        Arrays.asList(resource));
+                Path expected = Paths.get(System.getProperty("natives.tempDir")).toRealPath();
+                if (loaded == null || !loaded.getParent().equals(expected)
+                        || !Files.isRegularFile(loaded.resolve(resource.fileName())) || loadCount() != 1)
+                    throw new AssertionError("README extraction or JNI initialization failed: " + loaded);
+                System.out.println("NATIVE_OK " + answer());
+                return;
+            }
             if (args.length > 1 && args[1].startsWith("os-")) {
+                if (args[1].equals("os-android")) System.setProperty("java.runtime.name", "Android Runtime");
                 boolean extracts = args[1].equals("os-unavailable") || args[1].equals("os-load-fallback");
                 if (args[1].equals("os-missing")) resource = NativeResource.fromClasspath(Probe.class,
                         "/not-in-jar/" + System.mapLibraryName("nativebootstrap_probe"));
                 if (args[1].equals("os-load-fallback"))
                     resource = NativeResource.fromClasspath(Probe.class, "/native/second.bin");
-                Path loaded = new NativeLoader(p -> System.load(p.toString()),
-                        name -> System.loadLibrary(name)).load(Arrays.asList(() -> {
+                java.util.List<? extends java.util.function.Supplier<Path>> candidates = args[1]
+                        .equals("os-android") ? NativeDirectories.fromRoots("jni-test", Arrays.asList(Paths.get(args[0])), OperatingSystems::detect) : Arrays.asList(() -> {
                             if (!extracts) throw new AssertionError("OS loading should not extract files");
                             return NativeDirectories.fromRoots("jni-test", Arrays.asList(Paths.get(args[0])),
                                     OperatingSystems::detect).get(0).get();
-                        }), Arrays.asList(resource));
+                        });
+                Path loaded = new NativeLoader(p -> System.load(p.toString()),
+                        name -> System.loadLibrary(name)).load(candidates, Arrays.asList(resource));
                 if (extracts ? loaded == null : loaded != null)
                     throw new AssertionError("Unexpected extraction directory: " + loaded);
                 if (loadCount() != 1) throw new AssertionError("JNI initialized more than once");

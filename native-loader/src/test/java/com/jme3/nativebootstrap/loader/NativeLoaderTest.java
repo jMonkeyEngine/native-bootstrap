@@ -1,6 +1,7 @@
 package com.jme3.nativebootstrap.loader;
 
 import com.jme3.nativebootstrap.os.OperatingSystems;
+import com.jme3.nativebootstrap.common.OperatingSystem;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.AfterEach;
@@ -48,6 +49,53 @@ class NativeLoaderTest {
 
     NativeResource resource(String name) {
         return NativeResource.fromClasspath(getClass(), "/native/" + name + ".bin");
+    }
+
+    @Test
+    void androidLoadsInstalledLibrariesInOrderWithoutExtractionEvenWhenOsFallbackIsDisabled() {
+        List<String> loaded = new ArrayList<>();
+        NativeLoader loader = new NativeLoader(path -> fail("Android must not extract"), loaded::add);
+        NativeResource installed = NativeResource.fromClasspath(getClass(),
+                "/native/" + System.mapLibraryName("installed"));
+        assertNull(loader.load(NativeDirectories.fromRoots("test", Arrays.asList(root.resolve("absent")),
+                () -> OperatingSystem.ANDROID), Arrays.asList(resource("first"), installed)));
+        assertFalse(Files.exists(root.resolve("absent")));
+        assertEquals(Arrays.asList("first.bin", "installed"), loaded);
+    }
+
+    @Test
+    void androidFailureStopsLoadingWithoutTryingExtraction() {
+        List<String> loaded = new ArrayList<>();
+        UnsatisfiedLinkError cause = new UnsatisfiedLinkError("missing installed library");
+        NativeLoader loader = new NativeLoader(path -> fail("Android must not extract"), name -> {
+            if (name.equals("second.bin")) throw cause;
+            loaded.add(name);
+        });
+        UnsatisfiedLinkError error = assertThrows(UnsatisfiedLinkError.class,
+                () -> loader.load(Arrays.asList(() -> {
+                    throw new AssertionError("Must not create directories");
+                }), Arrays.asList(resource("first"), resource("second"), resource("third")),
+                        OperatingSystem.ANDROID));
+        assertEquals(Arrays.asList("first.bin"), loaded);
+        assertSame(cause, error.getSuppressed()[0]);
+        assertTrue(error.getMessage().contains("successfully loading"));
+    }
+
+    @Test
+    void iosUsesAlreadyLinkedCodeWithoutExtractionOrLoading() {
+        NativeLoader loader = new NativeLoader(path -> fail("iOS must not extract"),
+                name -> fail("iOS must not dynamically load"));
+        assertNull(loader.load(NativeDirectories.fromRoots("test", Arrays.asList(root.resolve("absent")),
+                () -> OperatingSystem.IOS), Arrays.asList(resource("first"), resource("second"))));
+        assertFalse(Files.exists(root.resolve("absent")));
+    }
+
+    @Test
+    void explicitIosWorksWithoutDirectoryCandidates() {
+        NativeLoader loader = new NativeLoader(path -> fail("iOS must not extract"),
+                name -> fail("iOS must not dynamically load"));
+        assertNull(
+                loader.load(Collections.emptyList(), Arrays.asList(resource("first")), OperatingSystem.IOS));
     }
 
     @Test
