@@ -96,6 +96,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - uses: android-actions/setup-android@v4
       - name: Install Android build tools
         shell: bash
         run: |
