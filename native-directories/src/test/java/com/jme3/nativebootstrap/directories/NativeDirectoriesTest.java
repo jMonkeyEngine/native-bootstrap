@@ -296,6 +296,26 @@ class NativeDirectoriesTest {
     }
 
     @Test
+    void rejectsZipFileSystemBeforeCreatingDirectories() throws IOException {
+        Path archive = root.resolve("filesystem.zip");
+        java.net.URI uri = java.net.URI.create("jar:" + archive.toUri());
+        try (java.nio.file.FileSystem zip = java.nio.file.FileSystems.newFileSystem(uri,
+                java.util.Collections.singletonMap("create", "true"))) {
+            Path zipRoot = zip.getPath("/");
+            for (Path candidateRoot : Arrays.asList(zipRoot, zipRoot.resolve("missing/parent"))) {
+                for (com.jme3.nativebootstrap.common.OperatingSystem os : Arrays.asList(
+                        com.jme3.nativebootstrap.common.OperatingSystem.WINDOWS, OperatingSystems.detect())) {
+                    assertThrows(UncheckedIOException.class, () -> NativeDirectories
+                            .fromRoots("test", Arrays.asList(candidateRoot), () -> os).get(0).get());
+                    try (Stream<Path> entries = Files.list(zipRoot)) {
+                        assertEquals(0, entries.count());
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     void rejectsPathTraversalNamespaces() {
         assertThrows(IllegalArgumentException.class,
                 () -> NativeDirectories.candidates("../escape", OperatingSystems::detect));

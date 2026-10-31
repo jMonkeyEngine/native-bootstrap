@@ -39,6 +39,11 @@ public final class DirectoryCandidate implements Supplier<Path> {
     @Override
     public Path get() {
         try {
+            try {
+                root.toFile();
+            } catch (UnsupportedOperationException e) {
+                throw new IOException("Native extraction requires a file-backed path: " + root, e);
+            }
             Path directory = PrivateDirectory.create(root, prefix, operatingSystem);
             directory.toFile().deleteOnExit();
             return directory;
