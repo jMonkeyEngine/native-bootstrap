@@ -64,6 +64,16 @@ jobs:
           sudo mkdir -p /mnt/native-bootstrap-noexec
           sudo mount -t tmpfs -o noexec,mode=1777 tmpfs /mnt/native-bootstrap-noexec
           echo 'NATIVE_BOOTSTRAP_NOEXEC_ROOT=/mnt/native-bootstrap-noexec' >> "$GITHUB_ENV"
+      - name: Prepare Linux user namespace fixture
+        if: runner.os == 'Linux' && matrix.java == '21'
+        shell: bash
+        run: |
+          if ! command -v bwrap >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y bubblewrap
+          fi
+          bwrap --version
+          echo 'NATIVE_BOOTSTRAP_TEST_BUBBLEWRAP=true' >> "$GITHUB_ENV"
       - name: Build, test real JNI and prepare artifacts
         shell: bash
         env:

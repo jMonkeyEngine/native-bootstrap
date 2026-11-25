@@ -68,8 +68,17 @@ class NativeDirectoriesTest {
                     });
             List<Path> paths = new ArrayList<>();
             for (DirectoryCandidate candidate : candidates) paths.add(candidate.root());
-            assertEquals(Arrays.asList(preferred, temp, cache.resolve("test"),
-                    home.resolve(".custom/natives/test")), paths);
+            List<Path> expected = Arrays.asList(preferred.resolve(".custom/test"),
+                    temp.resolve(".custom/test"), cache.resolve(".custom/test"),
+                    home.resolve(".custom/test"));
+            if (os == OperatingSystem.LINUX) {
+                assertEquals(expected, paths.subList(0, expected.size()));
+                Path sharedMemory = Paths.get("/dev/shm");
+                assertEquals(sharedMemory.isAbsolute() && Files.isDirectory(sharedMemory),
+                        paths.contains(sharedMemory.resolve(".custom/test")));
+            } else {
+                assertEquals(expected, paths);
+            }
             assertEquals(1, calls.get());
         }
         assertFalse(Files.exists(temp));
@@ -85,11 +94,10 @@ class NativeDirectoriesTest {
         Path cache = root.resolve("missing/cache");
         System.setProperty("natives.cacheDir", cache.toString());
         List<DirectoryCandidate> candidates = NativeDirectories.candidates("test", OperatingSystems::detect);
-        assertEquals(1, candidates.size());
-        assertEquals(cache.resolve("test"), candidates.get(0).root());
+        assertEquals(cache.resolve(".jme3/test"), candidates.get(0).root());
         assertFalse(Files.exists(cache));
         Path directory = candidates.get(0).get();
-        assertEquals(cache.resolve("test").toRealPath(), directory.getParent());
+        assertEquals(cache.resolve(".jme3/test").toRealPath(), directory.getParent());
     }
 
     @Test
@@ -117,6 +125,7 @@ class NativeDirectoriesTest {
 
     @Test
     void mobileCandidatesDoNotResolveExtractionPathProperties() {
+        System.setProperty("natives.namespace", "invalid/prefix");
         for (String property : Arrays.asList("natives.tempDir", "natives.userHome", "natives.cacheDir"))
             System.setProperty(property, "relative-path");
         for (OperatingSystem os : Arrays.asList(OperatingSystem.ANDROID, OperatingSystem.IOS)) {
@@ -125,60 +134,90 @@ class NativeDirectoriesTest {
             assertEquals(1, candidates.size());
             assertEquals(os, candidates.get(0).operatingSystem());
             assertThrows(UnsupportedOperationException.class, candidates.get(0)::root);
+            assertThrows(UnsupportedOperationException.class,
+                    NativeDirectories.fromRoots("test", Arrays.asList(root), () -> os).get(0)::root);
         }
     }
 
     @Test
-    void homeOverrideAlsoDrivesTheDefaultMacCache() {
-        Path home = root.resolve("override-home");
+    void missingDiscoveredBasesAreSkippedEvenWhenHomeIsConfigured() throws IOException {
+        Path home = root.resolve("home");
+        Path temp = root.resolve("temp");
+        System.setProperty("user.home", home.toString());
+        System.setProperty("java.io.tmpdir", temp.toString());
+        assertTrue(NativeDirectories.candidates("test", () -> OperatingSystem.MACOS).isEmpty());
+        Files.createFile(temp);
         System.setProperty("natives.userHome", home.toString());
-        System.setProperty("user.home", root.resolve("original-home").toString());
-        System.setProperty("java.io.tmpdir", root.resolve("temp").toString());
         List<DirectoryCandidate> candidates = NativeDirectories.candidates("test",
                 () -> OperatingSystem.MACOS);
-        assertEquals(home.resolve("Library/Caches/test"), candidates.get(1).root());
-        assertEquals(home.resolve(".jme3/natives/test"), candidates.get(2).root());
+        assertEquals(1, candidates.size());
+        assertEquals(home.resolve(".jme3/test"), candidates.get(0).root());
+        assertFalse(Files.exists(home));
+        Files.createDirectories(home.resolve("Library/Caches"));
+        candidates = NativeDirectories.candidates("test", () -> OperatingSystem.MACOS);
+        assertEquals(home.resolve("Library/Caches/.jme3/test"), candidates.get(0).root());
+        assertEquals(home.resolve(".jme3/test"), candidates.get(1).root());
     }
 
     @Test
-    void namespaceOverrideChangesOnlyTheDefaultHomePrefix() {
-        Path home = root.resolve("home");
+    void discoveredBaseRemovedAfterSelectionIsNeverRecreated() throws IOException {
+        Path temp = Files.createDirectory(root.resolve("temp"));
+        System.setProperty("java.io.tmpdir", temp.toString());
+        for (OperatingSystem os : Arrays.asList(OperatingSystem.LINUX, OperatingSystem.MACOS,
+                OperatingSystem.WINDOWS)) {
+            DirectoryCandidate candidate = NativeDirectories.candidates("test", () -> os).get(0);
+            assertEquals(temp.resolve(".jme3/test"), candidate.root());
+            Files.delete(temp);
+            assertThrows(UncheckedIOException.class, candidate::get);
+            assertFalse(Files.exists(temp));
+            Files.createDirectory(temp);
+        }
+    }
+
+    @Test
+    void namespacePropertyAndExplicitPrefixApplyToEveryBase() throws IOException {
+        Path home = Files.createDirectory(root.resolve("home"));
+        Path cache = Files.createDirectories(home.resolve("Library/Caches"));
+        Path temp = Files.createDirectory(root.resolve("temp"));
         System.setProperty("user.home", home.toString());
-        System.setProperty("java.io.tmpdir", root.resolve("temp").toString());
+        System.setProperty("java.io.tmpdir", temp.toString());
         System.setProperty("natives.namespace", ".app");
         List<DirectoryCandidate> defaults = NativeDirectories.candidates("test", () -> OperatingSystem.MACOS);
-        assertEquals(home.resolve(".app/natives/test"), defaults.get(2).root());
-        assertEquals(home.resolve("Library/Caches/test"), defaults.get(1).root());
         List<DirectoryCandidate> explicit = NativeDirectories.candidates(".explicit", "test",
                 () -> OperatingSystem.MACOS);
-        assertEquals(home.resolve(".explicit/natives/test"), explicit.get(2).root());
+        List<Path> bases = Arrays.asList(temp, cache, home);
+        for (int i = 0; i < bases.size(); i++) {
+            assertEquals(bases.get(i).resolve(".app/test"), defaults.get(i).root());
+            assertEquals(bases.get(i).resolve(".explicit/test"), explicit.get(i).root());
+            assertFalse(Files.exists(bases.get(i).resolve(".app")));
+        }
+        assertEquals(temp.resolve(".app/test"),
+                new DirectoryCandidate(temp, "test", OperatingSystems.detect()).root());
+        assertEquals(temp.resolve(".app/test"), NativeDirectories
+                .fromRoots("test", Arrays.asList(temp), OperatingSystems::detect).get(0).root());
         System.setProperty("natives.namespace", "  ");
-        assertEquals(home.resolve(".jme3/natives/test"),
+        assertEquals(home.resolve(".jme3/test"),
                 NativeDirectories.candidates("test", () -> OperatingSystem.MACOS).get(2).root());
         System.setProperty("natives.namespace", "../escape");
         assertThrows(IllegalArgumentException.class,
                 () -> NativeDirectories.candidates("test", OperatingSystems::detect));
-        assertEquals(home.resolve(".explicit/natives/test"),
+        assertEquals(home.resolve(".explicit/test"),
                 NativeDirectories.candidates(".explicit", "test", () -> OperatingSystem.MACOS).get(2).root());
     }
 
     @Test
     void blankOverridesUseDefaultsAndRelativeOverridesAreRejected() {
-        Path home = root.resolve("home"), temp = root.resolve("temp");
-        System.setProperty("user.home", home.toString());
-        System.setProperty("java.io.tmpdir", temp.toString());
+        System.setProperty("java.io.tmpdir", root.toString());
         for (String property : Arrays.asList("natives.tempDir", "natives.userHome", "natives.cacheDir"))
             System.setProperty(property, "  ");
-        List<DirectoryCandidate> candidates = NativeDirectories.candidates("test",
-                () -> OperatingSystem.MACOS);
-        assertEquals(temp, candidates.get(0).root());
-        assertEquals(home.resolve("Library/Caches/test"), candidates.get(1).root());
+        assertEquals(root.resolve(".jme3/test"),
+                NativeDirectories.candidates("test", OperatingSystems::detect).get(0).root());
         for (String property : Arrays.asList("natives.tempDir", "natives.userHome", "natives.cacheDir")) {
             System.setProperty(property, "relative/path");
             assertTrue(assertThrows(IllegalArgumentException.class,
                     () -> NativeDirectories.candidates("test", OperatingSystems::detect)).getMessage()
                     .contains(property));
-            assertEquals(root, NativeDirectories
+            assertEquals(root.resolve(".jme3/test"), NativeDirectories
                     .fromRoots("test", Arrays.asList(root), OperatingSystems::detect).get(0).root());
             System.clearProperty(property);
         }
@@ -189,51 +228,16 @@ class NativeDirectoriesTest {
         Path a = root.resolve("a"), b = root.resolve("b");
         List<DirectoryCandidate> candidates = NativeDirectories.fromRoots("test", Arrays.asList(a, b, a),
                 OperatingSystems::detect);
-        assertEquals(Arrays.asList(a, b), Arrays.asList(candidates.get(0).root(), candidates.get(1).root()));
+        assertEquals(2, candidates.size());
+        assertEquals(a.resolve(".jme3/test"), candidates.get(0).root());
+        assertEquals(b.resolve(".jme3/test"), candidates.get(1).root());
         assertFalse(Files.exists(a));
         assertFalse(Files.exists(b));
         assertThrows(UnsupportedOperationException.class, () -> candidates.clear());
     }
 
     @Test
-    void defaultAndCustomHomePrefixesPreserveCandidateOrderAndLazyCreation() throws IOException {
-        String previousHome = System.getProperty("user.home");
-        String previousTemp = System.getProperty("java.io.tmpdir");
-        Path home = root.resolve("home"), temp = root.resolve("temp"), preferred = root.resolve("preferred");
-        try {
-            System.setProperty("user.home", home.toString());
-            System.setProperty("java.io.tmpdir", temp.toString());
-            List<DirectoryCandidate> defaults = NativeDirectories.candidates("test",
-                    () -> OperatingSystem.MACOS);
-            assertEquals(
-                    Arrays.asList(temp, home.resolve("Library/Caches/test"),
-                            home.resolve(".jme3/natives/test")),
-                    Arrays.asList(defaults.get(0).root(), defaults.get(1).root(), defaults.get(2).root()));
-            List<DirectoryCandidate> custom = NativeDirectories.candidates(".my-app", "test",
-                    () -> OperatingSystem.MACOS);
-            assertEquals(defaults.get(0).root(), custom.get(0).root());
-            assertEquals(defaults.get(1).root(), custom.get(1).root());
-            assertEquals(home.resolve(".my-app/natives/test"), custom.get(2).root());
-            List<DirectoryCandidate> withPreferred = NativeDirectories.candidates(".my-app", "test",
-                    Arrays.asList(preferred, temp, preferred), OperatingSystems::detect);
-            assertEquals(preferred, withPreferred.get(0).root());
-            assertEquals(temp, withPreferred.get(1).root());
-            DirectoryCandidate fallback = withPreferred.get(withPreferred.size() - 1);
-            assertEquals(home.resolve(".my-app/natives/test"), fallback.root());
-            assertFalse(Files.exists(home));
-            assertFalse(Files.exists(temp));
-            assertFalse(Files.exists(preferred));
-            Path directory = fallback.get();
-            assertEquals(fallback.root().toRealPath(), directory.getParent());
-            assertTrue(directory.getFileName().toString().startsWith("test-"));
-        } finally {
-            System.setProperty("user.home", previousHome);
-            System.setProperty("java.io.tmpdir", previousTemp);
-        }
-    }
-
-    @Test
-    void rejectsHomePrefixesThatEscapeTheUsersHome() {
+    void rejectsPrefixesThatEscapeTheBase() {
         for (String prefix : new String[] { null, "", ".", "..", "../escape", "/tmp", "C:\\temp",
                 "nested/path", "nested\\path" }) {
             assertThrows(IllegalArgumentException.class,
@@ -251,13 +255,14 @@ class NativeDirectoriesTest {
         try {
             // A Darwin detector result must select the macOS cache even with a conflicting host label.
             System.setProperty("os.name", "Windows 11");
+            Files.createDirectories(root.resolve("home/Library/Caches"));
             System.setProperty("user.home", root.resolve("home").toString());
-            System.setProperty("java.io.tmpdir", root.resolve("temp").toString());
+            System.setProperty("java.io.tmpdir", Files.createDirectory(root.resolve("temp")).toString());
             List<DirectoryCandidate> candidates = NativeDirectories.candidates("injected", () -> {
                 calls.incrementAndGet();
                 return com.jme3.nativebootstrap.common.OperatingSystem.MACOS;
             });
-            assertEquals(root.resolve("home/Library/Caches/injected"), candidates.get(1).root());
+            assertEquals(root.resolve("home/Library/Caches/.jme3/injected"), candidates.get(1).root());
             assertEquals(1, calls.get());
             assertFalse(Files.exists(candidates.get(1).root()));
         } finally {
@@ -284,6 +289,26 @@ class NativeDirectoriesTest {
         assertThrows(UncheckedIOException.class, candidate::get);
         assertFalse(Files.exists(missing));
         assertThrows(NullPointerException.class, () -> NativeDirectories.candidates("test", () -> null));
+    }
+
+    @Test
+    void onlyTheApplicationDirectoryIsHidden() throws IOException {
+        Path base = Files.createDirectory(root.resolve("visible-base"));
+        OperatingSystem os = OperatingSystems.detect();
+        for (String prefix : Arrays.asList("my-app", ".my-app")) {
+            DirectoryCandidate candidate = NativeDirectories
+                    .candidates(prefix, "bindings", Arrays.asList(base), () -> os).get(0);
+            Path expected = base.resolve(".my-app/bindings");
+            assertEquals(expected, candidate.root());
+            Path fresh = candidate.get();
+            assertEquals(expected.toRealPath(), fresh.getParent());
+            assertTrue(fresh.getFileName().toString().startsWith("bindings-"));
+            for (Path path : Arrays.asList(base, expected.getParent(), expected, fresh)) {
+                boolean hidden = os == OperatingSystem.WINDOWS ? (Boolean) Files.getAttribute(path,
+                        "dos:hidden") : Files.isHidden(path);
+                assertEquals(path.equals(expected.getParent()), hidden, path.toString());
+            }
+        }
     }
 
     @Test
@@ -366,7 +391,7 @@ class NativeDirectoriesTest {
         Path alias = Files.createSymbolicLink(root.resolve("alias"), real);
         Path created = NativeDirectories.fromRoots("test", Arrays.asList(alias), OperatingSystems::detect)
                 .get(0).get();
-        assertEquals(real.toRealPath(), created.getParent());
+        assertEquals(real.resolve(".jme3/test").toRealPath(), created.getParent());
     }
 
     @Test
@@ -378,6 +403,8 @@ class NativeDirectoriesTest {
             assertThrows(UncheckedIOException.class, () -> NativeDirectories
                     .fromRoots("test", Arrays.asList(shared), OperatingSystems::detect).get(0).get());
         } finally {
+            Files.deleteIfExists(shared.resolve(".jme3/test"));
+            Files.deleteIfExists(shared.resolve(".jme3"));
             Files.delete(shared);
         }
     }
@@ -390,8 +417,11 @@ class NativeDirectoriesTest {
                 root.toString()).start().waitFor());
         assertThrows(UncheckedIOException.class, () -> NativeDirectories
                 .fromRoots("test", Arrays.asList(root), OperatingSystems::detect).get(0).get());
-        try (Stream<Path> entries = Files.list(root)) {
-            assertEquals(0, entries.count());
+        Path destination = root.resolve(".jme3/test");
+        if (Files.isDirectory(destination)) {
+            try (Stream<Path> entries = Files.list(destination)) {
+                assertEquals(0, entries.count());
+            }
         }
     }
 
@@ -408,6 +438,8 @@ class NativeDirectoriesTest {
             assertThrows(UncheckedIOException.class, () -> NativeDirectories
                     .fromRoots("test", Arrays.asList(child), OperatingSystems::detect).get(0).get());
         } finally {
+            Files.deleteIfExists(child.resolve(".jme3/test"));
+            Files.deleteIfExists(child.resolve(".jme3"));
             Files.deleteIfExists(child);
             Files.delete(parent);
         }
@@ -423,17 +455,31 @@ class NativeDirectoriesTest {
 
     @Test
     void doesNotConsultMountMetadata() throws Exception {
-        String executable = OperatingSystems
-                .detect() == com.jme3.nativebootstrap.common.OperatingSystem.WINDOWS ? "java.exe" : "java";
-        String classpath = System.getProperty("test.classpath");
-        Path log = root.resolve("no-filestore.log");
-        ArrayList<String> command = new ArrayList<String>();
+        runDirectoryProbe(NoStoreProbe.class);
+    }
+
+    @Test
+    void cacheEnvironmentVariablesOnlySelectAnExistingBaseEvenWithoutAHome() throws Exception {
+        runDirectoryProbe(CacheProbe.class);
+    }
+
+    private void runDirectoryProbe(Class<?> probe) throws Exception {
+        String executable = OperatingSystems.detect() == OperatingSystem.WINDOWS ? "java.exe" : "java";
+        Path log = root.resolve(probe.getSimpleName() + ".log");
+        List<String> command = new ArrayList<>();
         command.add(Paths.get(System.getProperty("java.home"), "bin", executable).toString());
-        if (Double.parseDouble(System.getProperty("java.specification.version")) >= 18)
+        if (probe == NoStoreProbe.class
+                && Double.parseDouble(System.getProperty("java.specification.version")) >= 18)
             command.add("-Djava.security.manager=allow");
-        command.addAll(Arrays.asList("-cp", classpath, NoStoreProbe.class.getName(), root.toString()));
-        Process process = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile())
-                .start();
+        command.addAll(
+                Arrays.asList("-cp", System.getProperty("test.classpath"), probe.getName(), root.toString()));
+        ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true)
+                .redirectOutput(log.toFile());
+        if (probe == CacheProbe.class) {
+            builder.environment().put("LOCALAPPDATA", root.resolve("windows-cache").toString());
+            builder.environment().put("XDG_CACHE_HOME", root.resolve("xdg-cache").toString());
+        }
+        Process process = builder.start();
         try {
             assertTrue(process.waitFor(45, java.util.concurrent.TimeUnit.SECONDS));
             assertEquals(0, process.exitValue(), new String(Files.readAllBytes(log), StandardCharsets.UTF_8));
@@ -442,9 +488,35 @@ class NativeDirectoriesTest {
         }
     }
 
+    public static class CacheProbe {
+        public static void main(String[] args) throws IOException {
+            System.clearProperty("user.home");
+            System.clearProperty("java.io.tmpdir");
+            for (OperatingSystem os : Arrays.asList(OperatingSystem.WINDOWS, OperatingSystem.LINUX)) {
+                Path base = Paths.get(args[0], os == OperatingSystem.WINDOWS ? "windows-cache" : "xdg-cache");
+                Path destination = base.resolve(".app/lib");
+                List<DirectoryCandidate> missing = NativeDirectories.candidates(".app", "lib", () -> os);
+                assertFalse(missing.stream().anyMatch(c -> c.root().equals(destination)));
+                assertFalse(Files.exists(base));
+                Files.createDirectory(base);
+                assertEquals(destination,
+                        NativeDirectories.candidates(".app", "lib", () -> os).get(0).root());
+                assertFalse(Files.exists(base.resolve(".app")));
+            }
+        }
+    }
+
     public static class NoStoreProbe {
         public static void main(String[] args) throws Exception {
+            Path base = Paths.get(args[0]);
+            String deniedTemp = base.resolve("denied-temp").toString();
+            System.setProperty("java.io.tmpdir", deniedTemp);
             System.setSecurityManager(new SecurityManager() {
+                @Override
+                public void checkRead(String file) {
+                    if (deniedTemp.equals(file)) throw new SecurityException("Temp directory unavailable");
+                }
+
                 @Override
                 public void checkPermission(java.security.Permission permission) {
                     if (permission.getName().equals("getFileStoreAttributes"))
@@ -452,8 +524,7 @@ class NativeDirectoriesTest {
                 }
             });
             Path directory = NativeDirectories
-                    .fromRoots("no-filestore", Arrays.asList(Paths.get(args[0])), OperatingSystems::detect)
-                    .get(0).get();
+                    .candidates("no-filestore", Arrays.asList(base), OperatingSystems::detect).get(0).get();
             Files.delete(directory);
         }
     }

@@ -168,7 +168,7 @@ class NativeLoaderTest {
             throw new UnsatisfiedLinkError("bad binary");
         }).load(Arrays.asList(candidate, candidate), Arrays.asList(resource("first"))));
         assertEquals(2, error.getSuppressed().length);
-        try (Stream<Path> entries = Files.list(root)) {
+        try (Stream<Path> entries = Files.list(candidate.root())) {
             assertEquals(0, entries.count());
         }
     }

@@ -3,14 +3,20 @@ package com.jme3.nativebootstrap.loader;
 import com.jme3.nativebootstrap.os.OperatingSystems;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import com.jme3.nativebootstrap.directories.DirectoryCandidate;
 import com.jme3.nativebootstrap.directories.NativeDirectories;
+import java.io.BufferedReader;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class NativeLoaderIntegrationTest {
     @TempDir
@@ -123,10 +129,7 @@ class NativeLoaderIntegrationTest {
         Path blocked = Files.write(root.resolve("blocked"), new byte[] { 1 });
         for (String destination : Arrays.asList("temp", "cache", "home")) {
             Path base = Files.createDirectory(root.resolve(destination));
-            Path expected = destination.equals(
-                    "temp") ? base.resolve("temp")
-                            : destination.equals("cache") ? base.resolve("cache/jni-test")
-                                                          : base.resolve("home/.custom/natives/jni-test");
+            Path expected = base.resolve(destination).resolve(".custom/jni-test");
             runProbe(base, destination, new String[] {
                     "-Dnatives.tempDir=" + (destination.equals("temp") ? base.resolve("temp") : blocked),
                     "-Dnatives.cacheDir=" + (destination.equals("home") ? blocked : base.resolve("cache")),
@@ -135,11 +138,40 @@ class NativeLoaderIntegrationTest {
         }
     }
 
+    @Test
+    void loadsRealJniInLinuxUserNamespaceWithUnmappedOwners() throws Exception {
+        assumeTrue("true".equals(System.getenv("NATIVE_BOOTSTRAP_TEST_BUBBLEWRAP")));
+        Path hostTmp = Paths.get("/tmp");
+        Path home = Paths.get("/host-home").resolve(hostTmp.relativize(root.toRealPath()));
+        List<String> sandbox = Arrays.asList("bwrap", "--unshare-user", "--uid", "1000", "--gid", "1000",
+                "--die-with-parent", "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc", "--ro-bind",
+                "/home", "/home", "--ro-bind-try", "/opt", "/opt", "--ro-bind-try", "/var", "/var",
+                "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64",
+                "/lib64", "--proc", "/proc", "--dev", "/dev", "--bind", "/tmp", "/tmp", "--bind", "/tmp",
+                "/host-home", "--perms", "01777", "--tmpfs", "/dev/shm", "--perms", "0700", "--dir",
+                "/runtime", "--setenv", "XDG_RUNTIME_DIR");
+        for (String runtime : Arrays.asList("/runtime", "/runtime/missing")) {
+            List<String> command = new java.util.ArrayList<>(sandbox);
+            command.addAll(Arrays.asList(runtime, "--chdir", "/", "--"));
+            String expectedRoot = (runtime.equals("/runtime") ? runtime : "/dev/shm") + "/.jme3/jni-test";
+            runProbe(root, "linux-namespace",
+                    new String[] { "-Djava.io.tmpdir=" + root.toRealPath(), "-Dnatives.userHome=" + home,
+                            "-Dnatives.cacheDir=" + home.resolve("cache"), "-Dnatives.withOsLibraries=false",
+                            "-Dprobe.expectedRoot=" + expectedRoot },
+                    command);
+        }
+    }
+
     private void runProbe(Path extraction, String mode, String[] options) throws Exception {
+        runProbe(extraction, mode, options, Collections.emptyList());
+    }
+
+    private void runProbe(Path extraction, String mode, String[] options, List<String> prefix)
+            throws Exception {
         Path log = extraction.resolve("smoke.log");
         String executable = OperatingSystems
                 .detect() == com.jme3.nativebootstrap.common.OperatingSystem.WINDOWS ? "java.exe" : "java";
-        java.util.List<String> command = new java.util.ArrayList<>();
+        List<String> command = new java.util.ArrayList<>(prefix);
         command.add(Paths.get(System.getProperty("java.home"), "bin", executable).toString());
         if (options != null) command.addAll(Arrays.asList(options));
         command.addAll(Arrays.asList("-cp", System.getProperty("test.classpath"), Probe.class.getName(),
@@ -159,6 +191,7 @@ class NativeLoaderIntegrationTest {
 
     public static class Probe {
         public static void main(String[] args) throws Exception {
+            if (args.length > 1 && args[1].equals("linux-namespace")) verifyUnmappedRoots();
             if (args.length > 1 && args[1].equals("without-helpers")) {
                 System.setSecurityManager(new SecurityManager() {
                     @Override
@@ -213,7 +246,8 @@ class NativeLoaderIntegrationTest {
                 Path loaded = new NativeLoader(path -> System.load(path.toString())).load(
                         NativeDirectories.candidates("jni-test", OperatingSystems::detect),
                         Arrays.asList(resource));
-                Path expected = Paths.get(System.getProperty("natives.tempDir")).toRealPath();
+                Path expected = Paths.get(System.getProperty("natives.tempDir"), ".jme3", "jni-test")
+                        .toRealPath();
                 if (loaded == null || !loaded.getParent().equals(expected)
                         || !Files.isRegularFile(loaded.resolve(resource.fileName())) || loadCount() != 1)
                     throw new AssertionError("README extraction or JNI initialization failed: " + loaded);
@@ -281,7 +315,38 @@ class NativeLoaderIntegrationTest {
             String expected = System.getProperty("probe.expectedRoot");
             if (expected != null && !loaded.getParent().equals(Paths.get(expected).toRealPath()))
                 throw new AssertionError("Unexpected extraction path: " + loaded);
+            if (args.length > 1 && args[1].equals("linux-namespace")
+                    && Files.exists(Paths.get("/runtime/missing")))
+                throw new AssertionError("A missing runtime directory was created");
             System.out.println("NATIVE_OK " + answer());
+        }
+
+        private static void verifyUnmappedRoots() throws Exception {
+            String overflowUid;
+            try (BufferedReader reader = Files.newBufferedReader(Paths.get("/proc/sys/kernel/overflowuid"))) {
+                overflowUid = reader.readLine().trim();
+            }
+            List<DirectoryCandidate> candidates = NativeDirectories.candidates("jni-test",
+                    OperatingSystems::detect);
+            Path runtime = Paths.get(System.getenv("XDG_RUNTIME_DIR"));
+            boolean runtimeCandidate = candidates.stream()
+                    .anyMatch(c -> c.root().equals(runtime.resolve(".jme3/jni-test")));
+            if (runtimeCandidate != Files.isDirectory(runtime) || Files.exists(runtime.resolve(".jme3")))
+                throw new AssertionError("Unexpected runtime candidate or eager creation: " + runtime);
+            for (int index = 0; index < 3; index++) {
+                Path ancestor = Paths.get(index == 0 ? "/tmp" : "/host-home");
+                String owner = Files.getAttribute(ancestor, "unix:uid").toString();
+                if (!overflowUid.equals(owner)) throw new AssertionError(
+                        "Expected unmapped owner " + overflowUid + " for " + ancestor + " but saw " + owner);
+                DirectoryCandidate candidate = candidates.get(index);
+                try {
+                    candidate.get();
+                    throw new AssertionError("Accepted " + candidate.root() + " with an unmapped ancestor");
+                } catch (UncheckedIOException failure) {
+                    if (!("Untrusted directory owner: " + ancestor).equals(failure.getCause().getMessage()))
+                        throw failure;
+                }
+            }
         }
     }
 }

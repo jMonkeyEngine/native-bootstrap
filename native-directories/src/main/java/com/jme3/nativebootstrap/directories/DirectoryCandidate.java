@@ -3,32 +3,61 @@ package com.jme3.nativebootstrap.directories;
 import com.jme3.nativebootstrap.common.OperatingSystem;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.function.Supplier;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * A lazy extraction destination. Each call creates a distinct directory with best-effort permission
  * hardening.
  */
 public final class DirectoryCandidate implements Supplier<Path> {
+    private static final Logger LOG = Logger.getLogger(DirectoryCandidate.class.getName());
+    private final Path base;
     private final Path root;
     private final String prefix;
     private final OperatingSystem operatingSystem;
+    private final boolean createBase;
 
-    public DirectoryCandidate(Path root, String namespace, OperatingSystem operatingSystem) {
-        this.root = root.toAbsolutePath().normalize();
+    /**
+     * Uses a manually specified base with the configured application prefix and library namespace.
+     *
+     * @param base
+     *            base directory to create on demand
+     * @param namespace
+     *            application or library name
+     * @param operatingSystem
+     *            platform used for permission checks
+     */
+    public DirectoryCandidate(Path base, String namespace, OperatingSystem operatingSystem) {
+        this(base, NativeDirectories.defaultHomePrefix(), namespace, operatingSystem, true);
+    }
+
+    DirectoryCandidate(Path base, String homePrefix, String namespace, OperatingSystem operatingSystem,
+            boolean createBase) {
+        NativeDirectories.validateHomePrefix(homePrefix);
+        NativeDirectories.validateNamespace(namespace);
+        this.base = base.toAbsolutePath().normalize();
+        String hiddenPrefix = homePrefix.startsWith(".") ? homePrefix : "." + homePrefix;
+        this.root = this.base.resolve(hiddenPrefix).resolve(namespace);
         this.prefix = namespace + "-";
         this.operatingSystem = operatingSystem;
+        this.createBase = createBase;
     }
 
     DirectoryCandidate(OperatingSystem operatingSystem) {
+        this.base = null;
         this.root = null;
         this.prefix = null;
         this.operatingSystem = operatingSystem;
+        this.createBase = false;
     }
 
     /**
-     * Returns the destination root without creating or accessing it.
+     * Returns the stable parent of the fresh extraction directories (base/.prefix/namespace).
      *
      * @return the configured absolute root
      * @throws UnsupportedOperationException
@@ -49,9 +78,9 @@ public final class DirectoryCandidate implements Supplier<Path> {
     }
 
     /**
-     * Creates missing parents and a fresh extraction directory, or throws UncheckedIOException. The
-     * natives.noAdditionalChecks system property disables external permission helpers when true; Java
-     * permission checks and directory creation remain active. The returned directory is scheduled for
+     * Creates a fresh extraction directory, or throws UncheckedIOException. Only explicit bases can be
+     * created. The natives.noAdditionalChecks system property disables external permission helpers when true;
+     * Java permission checks and directory creation remain active. The returned directory is scheduled for
      * best-effort deletion at JVM exit; callers must arrange cleanup for any files they add.
      */
     @Override
@@ -63,7 +92,8 @@ public final class DirectoryCandidate implements Supplier<Path> {
             } catch (UnsupportedOperationException e) {
                 throw new IOException("Native extraction requires a file-backed path: " + root, e);
             }
-            Path directory = PrivateDirectory.create(root, prefix, operatingSystem);
+            Path directory = PrivateDirectory.create(base, root, prefix, operatingSystem, createBase,
+                    new PermissionCommands());
             directory.toFile().deleteOnExit();
             return directory;
         } catch (IOException e) {

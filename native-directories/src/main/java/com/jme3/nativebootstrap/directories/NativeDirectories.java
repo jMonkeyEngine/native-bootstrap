@@ -1,14 +1,15 @@
 package com.jme3.nativebootstrap.directories;
 
 import com.jme3.nativebootstrap.common.OperatingSystem;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.function.Supplier;
 
 /** Discovers ordered destinations without creating directories or loading native code. */
@@ -17,10 +18,9 @@ public final class NativeDirectories {
     }
 
     /**
-     * Returns preferred roots, JVM temp, user cache and ~/.jme3/natives/namespace, in that order. Default
-     * paths may be overridden with natives.tempDir, natives.userHome and natives.cacheDir. The default .jme3
-     * home prefix may be overridden with natives.namespace. Android and iOS return only a virtual candidate
-     * that carries the platform without referring to a filesystem directory.
+     * Tries preferred bases, JVM temp, user cache and user home in order. Linux also tries XDG_RUNTIME_DIR
+     * and /dev/shm. Each base uses the same prefix and namespace layout. The prefix defaults to .jme3 and can
+     * be set with natives.namespace. Android and iOS return a virtual candidate.
      *
      * @param namespace
      *            application or library name
@@ -32,18 +32,16 @@ public final class NativeDirectories {
      */
     public static List<DirectoryCandidate> candidates(String namespace, List<Path> preferredRoots,
             Supplier<OperatingSystem> operatingSystem) {
-        String homePrefix = System.getProperty("natives.namespace");
-        if (homePrefix == null || homePrefix.trim().isEmpty()) homePrefix = ".jme3";
-        return candidates(homePrefix, namespace, preferredRoots, operatingSystem);
+        return candidates(null, namespace, preferredRoots, operatingSystem, true);
     }
 
     /**
-     * Returns preferred roots, JVM temp, user cache and ~/homePrefix/natives/namespace, in that order. Path
-     * system properties apply; the explicit homePrefix takes precedence over natives.namespace. Android and
-     * iOS return only a virtual candidate without a filesystem directory.
+     * Returns the ordered candidates with an explicit prefix. Discovered bases must already exist. Preferred
+     * bases and explicit natives.tempDir, natives.cacheDir and natives.userHome overrides can be created on
+     * first use.
      *
      * @param homePrefix
-     *            directory name under the user's home, for example ".jme3"
+     *            directory name under every base, for example ".jme3"
      * @param namespace
      *            application or library name
      * @param preferredRoots
@@ -55,34 +53,11 @@ public final class NativeDirectories {
     public static List<DirectoryCandidate> candidates(String homePrefix, String namespace,
             List<Path> preferredRoots, Supplier<OperatingSystem> operatingSystem) {
         validateHomePrefix(homePrefix);
-        validateNamespace(namespace);
-        OperatingSystem os = resolve(operatingSystem);
-        if (os == OperatingSystem.ANDROID || os == OperatingSystem.IOS)
-            return buildCandidates(namespace, Collections.emptyList(), os);
-        Set<Path> roots = new LinkedHashSet<>();
-        for (Path root : preferredRoots) roots.add(Objects.requireNonNull(root).toAbsolutePath().normalize());
-        Path temp = overridePath("natives.tempDir");
-        if (temp != null) roots.add(temp.normalize());
-        else addAbsolute(roots, System.getProperty("java.io.tmpdir"));
-        Path userHome = overridePath("natives.userHome");
-        if (userHome == null) userHome = absolutePath(System.getProperty("user.home"));
-        Path cache = overridePath("natives.cacheDir");
-        if (cache == null && userHome != null) {
-            if (os == OperatingSystem.WINDOWS)
-                cache = absoluteOr(System.getenv("LOCALAPPDATA"), userHome.resolve("AppData/Local"));
-            else if (os == OperatingSystem.MACOS) cache = userHome.resolve("Library/Caches");
-            else cache = absoluteOr(System.getenv("XDG_CACHE_HOME"), userHome.resolve(".cache"));
-        }
-        if (cache != null) roots.add(cache.resolve(namespace).toAbsolutePath().normalize());
-        if (userHome != null) {
-            roots.add(userHome.resolve(homePrefix).resolve("natives").resolve(namespace).toAbsolutePath()
-                    .normalize());
-        }
-        return buildCandidates(namespace, new ArrayList<>(roots), os);
+        return candidates(homePrefix, namespace, preferredRoots, operatingSystem, true);
     }
 
     /**
-     * Returns the default ordered candidates with ~/.jme3/natives/namespace as the home fallback.
+     * Returns the default ordered candidates.
      *
      * @param namespace
      *            application or library name
@@ -96,10 +71,10 @@ public final class NativeDirectories {
     }
 
     /**
-     * Returns the default ordered candidates with a custom home fallback prefix.
+     * Returns the default ordered candidates with a custom prefix for every base.
      *
      * @param homePrefix
-     *            directory name under the user's home, for example ".jme3"
+     *            directory name under every base, for example ".jme3"
      * @param namespace
      *            application or library name
      * @param operatingSystem
@@ -118,48 +93,125 @@ public final class NativeDirectories {
      * @param namespace
      *            application or library name
      * @param roots
-     *            exact extraction roots
+     *            explicit base directories
      * @param operatingSystem
      *            supplier evaluated once per list
      * @return an immutable ordered list of lazy suppliers
      */
     public static List<DirectoryCandidate> fromRoots(String namespace, List<Path> roots,
             Supplier<OperatingSystem> operatingSystem) {
-        validateNamespace(namespace);
-        return buildCandidates(namespace, roots, resolve(operatingSystem));
+        return candidates(null, namespace, roots, operatingSystem, false);
     }
 
-    private static List<DirectoryCandidate> buildCandidates(String namespace, List<Path> roots,
-            OperatingSystem os) {
+    private static List<DirectoryCandidate> candidates(String homePrefix, String namespace,
+            List<Path> preferredRoots, Supplier<OperatingSystem> operatingSystem, boolean includeDefaults) {
+        validateNamespace(namespace);
+        Objects.requireNonNull(operatingSystem, "operatingSystem");
+        OperatingSystem os = Objects.requireNonNull(operatingSystem.get(), "OS supplier returned null");
         if (os == OperatingSystem.ANDROID || os == OperatingSystem.IOS)
             return Collections.singletonList(new DirectoryCandidate(os));
-        Set<Path> unique = new LinkedHashSet<>();
-        for (Path root : roots) unique.add(Objects.requireNonNull(root).toAbsolutePath().normalize());
-        List<DirectoryCandidate> result = new ArrayList<>();
-        for (Path root : unique) result.add(new DirectoryCandidate(root, namespace, os));
-        return Collections.unmodifiableList(result);
+        if (homePrefix == null) {
+            homePrefix = defaultHomePrefix();
+            validateHomePrefix(homePrefix);
+        }
+
+        Roots roots = new Roots();
+        for (Path base : preferredRoots) {
+            roots.createAndUse(base);
+        }
+        if (includeDefaults) {
+            Path temp = overridePath("natives.tempDir");
+            if (temp != null) {
+                roots.createAndUse(temp);
+            } else {
+                roots.use(absolutePath(System.getProperty("java.io.tmpdir")));
+            }
+
+            Path homeOverride = overridePath("natives.userHome");
+            Path userHome = homeOverride;
+            if (userHome == null) {
+                userHome = absolutePath(System.getProperty("user.home"));
+            }
+            Path cache = overridePath("natives.cacheDir");
+            if (cache != null) {
+                roots.createAndUse(cache);
+            } else {
+                String cacheUnderHome;
+                switch (os) {
+                    case WINDOWS:
+                        cache = absolutePath(System.getenv("LOCALAPPDATA"));
+                        cacheUnderHome = "AppData/Local";
+                        break;
+                    case MACOS:
+                        cacheUnderHome = "Library/Caches";
+                        break;
+                    default:
+                        cache = absolutePath(System.getenv("XDG_CACHE_HOME"));
+                        cacheUnderHome = ".cache";
+                        break;
+                }
+                if (cache == null && userHome != null) {
+                    cache = userHome.resolve(cacheUnderHome);
+                }
+                roots.use(cache);
+            }
+
+            if (homeOverride != null) {
+                roots.createAndUse(homeOverride);
+            } else {
+                roots.use(userHome);
+            }
+            if (os == OperatingSystem.LINUX) {
+                roots.use(absolutePath(System.getenv("XDG_RUNTIME_DIR")));
+                roots.use(Paths.get("/dev/shm"));
+            }
+        }
+
+        List<DirectoryCandidate> candidates = new ArrayList<>();
+        for (Map.Entry<Path, Boolean> entry : roots.bases.entrySet()) {
+            Path base = entry.getKey();
+            boolean createBase = entry.getValue();
+            candidates.add(new DirectoryCandidate(base, homePrefix, namespace, os, createBase));
+        }
+        return Collections.unmodifiableList(candidates);
     }
 
-    private static OperatingSystem resolve(Supplier<OperatingSystem> operatingSystem) {
-        return Objects.requireNonNull(Objects.requireNonNull(operatingSystem, "operatingSystem").get(),
-                "OS supplier returned null");
+    private static final class Roots {
+        private final Map<Path, Boolean> bases = new LinkedHashMap<>();
+
+        // The candidate can create this base on first use.
+        void createAndUse(Path base) {
+            bases.put(base.toAbsolutePath().normalize(), true);
+        }
+
+        void use(Path base) {
+            if (base == null || !base.isAbsolute()) return;
+            Path normalized = base.normalize();
+            try {
+                if (Files.isDirectory(normalized)) {
+                    bases.putIfAbsent(normalized, false);
+                }
+            } catch (SecurityException denied) {
+                // An inaccessible system base must not prevent trying the other candidates.
+            }
+        }
     }
 
-    private static void validateNamespace(String namespace) {
+    static String defaultHomePrefix() {
+        String value = System.getProperty("natives.namespace");
+        return value == null || value.trim().isEmpty() ? ".jme3" : value;
+    }
+
+    static void validateNamespace(String namespace) {
         if (namespace == null || !namespace.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,63}"))
             throw new IllegalArgumentException("Namespace must be a simple name of 1 to 64 characters");
     }
 
-    private static void validateHomePrefix(String homePrefix) {
+    static void validateHomePrefix(String homePrefix) {
         if (homePrefix == null || !homePrefix.matches("[A-Za-z0-9._-]{1,64}") || homePrefix.equals(".")
                 || homePrefix.equals(".."))
             throw new IllegalArgumentException(
                     "Home prefix must be a simple directory name of 1 to 64 characters");
-    }
-
-    private static void addAbsolute(Set<Path> roots, String value) {
-        Path path = absolutePath(value);
-        if (path != null) roots.add(path.normalize());
     }
 
     private static Path absolutePath(String value) {
@@ -176,8 +228,4 @@ public final class NativeDirectories {
         return path;
     }
 
-    private static Path absoluteOr(String value, Path fallback) {
-        return value != null && !value.isEmpty() && Paths.get(value).isAbsolute() ? Paths.get(value)
-                                                                                  : fallback;
-    }
 }
