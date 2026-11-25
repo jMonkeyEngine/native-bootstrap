@@ -292,7 +292,7 @@ class NativeDirectoriesTest {
     }
 
     @Test
-    void onlyTheApplicationDirectoryIsHidden() throws IOException {
+    void onlyTheApplicationDirectoryHasADotPrefix() throws IOException {
         Path base = Files.createDirectory(root.resolve("visible-base"));
         OperatingSystem os = OperatingSystems.detect();
         for (String prefix : Arrays.asList("my-app", ".my-app")) {
@@ -306,7 +306,8 @@ class NativeDirectoriesTest {
             for (Path path : Arrays.asList(base, expected.getParent(), expected, fresh)) {
                 boolean hidden = os == OperatingSystem.WINDOWS ? (Boolean) Files.getAttribute(path,
                         "dos:hidden") : Files.isHidden(path);
-                assertEquals(path.equals(expected.getParent()), hidden, path.toString());
+                boolean expectedHidden = os != OperatingSystem.WINDOWS && path.equals(expected.getParent());
+                assertEquals(expectedHidden, hidden, path.toString());
             }
         }
     }
